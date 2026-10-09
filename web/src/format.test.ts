@@ -1,0 +1,56 @@
+import { expect, test } from 'vitest'
+import { candleTime, formatDataTo, formatPct, formatPrice, formatRange, pricePrecision, staleDate } from './format'
+
+test('pricePrecision uses 2 decimals from 1 upwards and more below', () => {
+  expect(pricePrecision(64123.5)).toBe(2)
+  expect(pricePrecision(1)).toBe(2)
+  expect(pricePrecision(0.5)).toBe(4)
+  expect(pricePrecision(0.00012)).toBe(7)
+  expect(pricePrecision(1e-12)).toBe(8)
+  expect(pricePrecision(0)).toBe(2)
+})
+
+test('formatPrice groups thousands and pads decimals', () => {
+  expect(formatPrice(64123.5)).toBe('64,123.50')
+  expect(formatPrice(0.00012345)).toBe('0.0001235')
+  expect(formatPrice(0.5, 2)).toBe('0.50')
+})
+
+test('formatPct signs the value and never shows a negative zero', () => {
+  expect(formatPct(1.234)).toBe('+1.23%')
+  expect(formatPct(-0.5)).toBe('-0.50%')
+  expect(formatPct(0)).toBe('0.00%')
+  expect(formatPct(-0.001)).toBe('0.00%')
+})
+
+test('formatRange signs the price difference and the percentage', () => {
+  expect(formatRange(1234.5, 1500, 2)).toBe('+265.50 (+21.51%)')
+  expect(formatRange(200, 150, 2)).toBe('-50.00 (-25.00%)')
+  expect(formatRange(0.0005, 0.00075, 6)).toBe('+0.000250 (+50.00%)')
+  expect(formatRange(100, 100, 2)).toBe('0.00 (0.00%)')
+  expect(formatRange(100, 99.999, 2)).toBe('0.00 (0.00%)')
+})
+
+test('candleTime maps a daily date to the candle whose bucket contains it', () => {
+  const weekly = [{ time: '2025-01-06' }, { time: '2025-01-13' }, { time: '2025-01-20' }]
+  expect(candleTime(weekly, '2025-01-13')).toBe('2025-01-13')
+  expect(candleTime(weekly, '2025-01-17')).toBe('2025-01-13')
+  expect(candleTime(weekly, '2025-01-19')).toBe('2025-01-13')
+  expect(candleTime(weekly, '2025-01-02')).toBe('2025-01-06') // before the first candle
+  expect(candleTime(weekly, '2026-05-01')).toBe('2025-01-20') // after the last candle
+})
+
+test('formatDataTo shows the date of the last candle', () => {
+  expect(formatDataTo(null)).toBe('not updated yet')
+  expect(formatDataTo('2026-10-08')).toBe('data to 8 Oct 2026')
+})
+
+test('staleDate dates a last candle more than 5 calendar days old', () => {
+  const now = Date.parse('2026-10-12T15:30:00Z') // a Monday
+  expect(staleDate('2026-10-12', now)).toBeNull()
+  expect(staleDate('2026-10-09', now)).toBeNull() // Friday's close
+  expect(staleDate('2026-10-07', now)).toBeNull() // 5 days
+  expect(staleDate('2026-10-06', now)).toBe('6 Oct')
+  expect(staleDate('2025-12-10', now)).toBe('10 Dec 2025')
+  expect(staleDate(null, now)).toBeNull()
+})
