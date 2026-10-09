@@ -1,0 +1,17 @@
+{
+  "name": "tickerdeck",
+  "private": true,
+  "type": "module",
+  "workspaces": ["server", "web"],
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "test": "npm test --workspaces",
+    "build": "npm run build --workspaces",
+    "dev": "concurrently -k -n server,web \"tsx watch --env-file-if-exists=.env server/src/index.ts\" \"npm run dev -w web\"",
+    "start": "node --env-file-if-exists=.env server/dist/index.js"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.6",
+    "tsx": "^4.23.15"
+  }
+}
