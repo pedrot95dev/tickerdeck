@@ -31,13 +31,7 @@ type TiingoRow = {
   splitFactor: number
 }
 
-/**
- * Daily candles from `startDate` ('YYYY-MM-DD', inclusive) to today.
- * Tiingo puts `splitFactor` on the day the split takes effect (4.0 for a 4:1 split, 1.0
- * otherwise) and that day's raw prices are already post-split, which is what `adjust` expects.
- */
-export async function fetchTiingo(fetch: Fetch, token: string, ticker: string, startDate: string): Promise<CandleRow[]> {
-  const url = `https://api.tiingo.com/tiingo/daily/${encodeURIComponent(ticker)}/prices?startDate=${startDate}&format=json`
+async function tiingoRows(fetch: Fetch, token: string, url: string): Promise<unknown[]> {
   const res = await fetch(url, {
     headers: { Authorization: `Token ${token}`, 'Content-Type': 'application/json' },
     signal: AbortSignal.timeout(TIMEOUT_MS),
@@ -50,6 +44,17 @@ export async function fetchTiingo(fetch: Fetch, token: string, ticker: string, s
   if (!res.ok) throw new Error(`Tiingo answered HTTP ${res.status}`)
   const body: unknown = await res.json()
   if (!Array.isArray(body)) throw new Error('Tiingo answered with an unexpected body')
+  return body
+}
+
+/**
+ * Daily candles from `startDate` ('YYYY-MM-DD', inclusive) to today.
+ * Tiingo puts `splitFactor` on the day the split takes effect (4.0 for a 4:1 split, 1.0
+ * otherwise) and that day's raw prices are already post-split, which is what `adjust` expects.
+ */
+export async function fetchTiingo(fetch: Fetch, token: string, ticker: string, startDate: string): Promise<CandleRow[]> {
+  const url = `https://api.tiingo.com/tiingo/daily/${encodeURIComponent(ticker)}/prices?startDate=${startDate}&format=json`
+  const body = await tiingoRows(fetch, token, url)
   return (body as TiingoRow[]).map((r) => ({
     date: r.date.slice(0, 10),
     open: r.open,
@@ -59,6 +64,37 @@ export async function fetchTiingo(fetch: Fetch, token: string, ticker: string, s
     volume: r.volume,
     split_factor: r.splitFactor,
   }))
+}
+
+export type Quote = {
+  /** 'YYYY-MM-DD' of the session the quote belongs to. */
+  date: string
+  /** When the price was last updated, as Tiingo gives it. */
+  time: string
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+}
+
+const price = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null)
+
+/** The running session of a stock from IEX; null when Tiingo has no usable one (before the open, unknown ticker). */
+export async function fetchTiingoQuote(fetch: Fetch, token: string, ticker: string): Promise<Quote | null> {
+  const [row] = (await tiingoRows(fetch, token, `https://api.tiingo.com/iex/?tickers=${encodeURIComponent(ticker)}`)) as (
+    | Record<string, unknown>
+    | null
+    | undefined
+  )[]
+  const time = row?.timestamp
+  const open = price(row?.open)
+  const high = price(row?.high)
+  const low = price(row?.low)
+  const close = price(row?.tngoLast)
+  if (typeof time !== 'string' || Number.isNaN(Date.parse(time)) || !open || !high || !low || !close) return null
+  const volume = typeof row?.volume === 'number' && Number.isFinite(row.volume) ? row.volume : 0
+  return { date: time.slice(0, 10), time, open, high, low, close, volume }
 }
 
 const BINANCE_PAGE = 1000

@@ -1,6 +1,14 @@
 import { expect, test } from 'vitest'
 import { adjust } from '../src/candles.js'
-import { fetchBinance, fetchTiingo, RateLimitedError, SymbolError } from '../src/providers.js'
+import {
+  fetchBinance,
+  fetchTiingo,
+  fetchTiingoQuote,
+  RateLimitedError,
+  SymbolError,
+  TokenError,
+  UnreachableError,
+} from '../src/providers.js'
 import { fakeFetch } from './fake-fetch.js'
 
 // Shape of Tiingo's end-of-day rows; AAPL around its 4:1 split of 2020-08-31.
@@ -60,6 +68,85 @@ test('Tiingo: 404 is an unknown ticker, 429 a rate limit, other failures plain e
   expect(server).not.toBeInstanceOf(SymbolError)
   expect(server).not.toBeInstanceOf(RateLimitedError)
   expect(server.message).toBe('Tiingo answered HTTP 500')
+})
+
+// Shape of Tiingo's IEX answer on the free plan.
+const iexRow = {
+  ticker: 'AAPL',
+  timestamp: '2026-10-08T20:00:00+00:00',
+  lastSaleTimestamp: '2026-10-08T20:00:00+00:00',
+  quoteTimestamp: '2026-10-08T20:00:00+00:00',
+  open: 336.815,
+  high: 341.57,
+  low: 335.9,
+  mid: null,
+  tngoLast: 340.42,
+  last: null,
+  lastSize: null,
+  bidSize: null,
+  bidPrice: null,
+  askPrice: null,
+  askSize: null,
+  volume: 35332449,
+  prevClose: 336.67,
+}
+
+test('Tiingo quote: requests the IEX quote with the token in the Authorization header only', async () => {
+  const { fetch, calls } = fakeFetch(() => ({ body: [iexRow] }))
+  await fetchTiingoQuote(fetch, 'secret-token', 'BRK-B')
+  expect(calls).toEqual([
+    {
+      url: 'https://api.tiingo.com/iex/?tickers=BRK-B',
+      headers: { Authorization: 'Token secret-token', 'Content-Type': 'application/json' },
+    },
+  ])
+})
+
+test('Tiingo quote: the last price is the close and the date is the day of the timestamp', async () => {
+  const quote = (row: unknown) => fetchTiingoQuote(fakeFetch(() => ({ body: [row] })).fetch, 't', 'AAPL')
+  expect(await quote(iexRow)).toEqual({
+    date: '2026-10-08',
+    time: '2026-10-08T20:00:00+00:00',
+    open: 336.815,
+    high: 341.57,
+    low: 335.9,
+    close: 340.42,
+    volume: 35332449,
+  })
+  expect(await quote({ ...iexRow, timestamp: '2026-10-08T15:59:58.123-04:00' })).toMatchObject({
+    date: '2026-10-08',
+    time: '2026-10-08T15:59:58.123-04:00',
+  })
+  expect(await quote({ ...iexRow, volume: null })).toMatchObject({ close: 340.42, volume: 0 })
+})
+
+test('Tiingo quote: no quote when the answer is empty or a needed field is missing or not a positive number', async () => {
+  const quote = (body: unknown) => fetchTiingoQuote(fakeFetch(() => ({ body })).fetch, 't', 'AAPL')
+  expect(await quote([])).toBeNull()
+  expect(await quote([null])).toBeNull()
+  for (const field of ['timestamp', 'open', 'high', 'low', 'tngoLast']) {
+    for (const value of [null, undefined, 0, -1, '340.42']) {
+      const row = { ...iexRow, [field]: value }
+      if (field === 'timestamp' && value === '340.42') continue
+      expect(await quote([row]), `${field}=${value}`).toBeNull()
+    }
+  }
+  expect(await quote([{ ...iexRow, timestamp: 'soon' }])).toBeNull()
+})
+
+test('Tiingo quote: fails with the same error classes as the daily download', async () => {
+  const status = (code: number) => fetchTiingoQuote(fakeFetch(() => ({ status: code, body: {} })).fetch, 't', 'X')
+  expect(await status(404).catch((e) => e)).toBeInstanceOf(SymbolError)
+  expect(await status(401).catch((e) => e)).toBeInstanceOf(TokenError)
+  expect(await status(403).catch((e) => e)).toBeInstanceOf(TokenError)
+  expect(await status(429).catch((e) => e)).toBeInstanceOf(RateLimitedError)
+  expect((await status(500).catch((e) => e)).message).toBe('Tiingo answered HTTP 500')
+  const offline = (async () => {
+    throw new TypeError('fetch failed')
+  }) as unknown as typeof fetch
+  expect(await fetchTiingoQuote(offline, 't', 'X').catch((e) => e)).toBeInstanceOf(UnreachableError)
+  const notAList = fetchTiingoQuote(fakeFetch(() => ({ body: { detail: 'x' } })).fetch, 't', 'X')
+  expect((await notAList.catch((e) => e)).message).toBe('Tiingo answered with an unexpected body')
 })
 
 const DAY = 86_400_000

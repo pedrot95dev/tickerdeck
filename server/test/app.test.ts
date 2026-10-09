@@ -113,21 +113,21 @@ test('POST /watchlists/:id/items adds resolved tickers as pending symbols, in or
   expect(await items(id)).toEqual([
     {
       id: 1,
-      symbol: { id: 1, source: 'tiingo', ticker: 'AAPL', status: 'pending', error: null, lastRefreshedAt: null },
+      symbol: { id: 1, source: 'tiingo', ticker: 'AAPL', status: 'pending', error: null, lastRefreshedAt: null, quotedAt: null },
       lastClose: null,
       changePct: null,
       lastDate: null,
     },
     {
       id: 2,
-      symbol: { id: 2, source: 'binance', ticker: 'BTCUSDT', status: 'pending', error: null, lastRefreshedAt: null },
+      symbol: { id: 2, source: 'binance', ticker: 'BTCUSDT', status: 'pending', error: null, lastRefreshedAt: null, quotedAt: null },
       lastClose: null,
       changePct: null,
       lastDate: null,
     },
     {
       id: 3,
-      symbol: { id: 3, source: 'tiingo', ticker: 'BRK-B', status: 'pending', error: null, lastRefreshedAt: null },
+      symbol: { id: 3, source: 'tiingo', ticker: 'BRK-B', status: 'pending', error: null, lastRefreshedAt: null, quotedAt: null },
       lastClose: null,
       changePct: null,
       lastDate: null,
@@ -253,6 +253,7 @@ test('GET candles returns stored rows ascending and split-adjusted, per timefram
       status: 'ready',
       error: null,
       lastRefreshedAt: '2025-02-04T00:00:00.000Z',
+      quotedAt: null,
     },
     candles: [
       { time: '2025-01-30', open: 50, high: 50, low: 50, close: 50, volume: 20 },

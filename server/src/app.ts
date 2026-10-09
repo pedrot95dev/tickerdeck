@@ -13,7 +13,9 @@ type SymbolRow = {
   status: string
   error: string | null
   last_refreshed_at: string | null
+  quoted_at: string | null
 }
+type StoredCandle = CandleRow & { provisional: number }
 type WatchlistRow = { id: number; name: string }
 type LineRow = { id: number; price: number }
 type IdParams = { Params: { id: string } }
@@ -27,13 +29,15 @@ class HttpError extends Error {
   }
 }
 
-const toSymbol = (r: SymbolRow) => ({
+/** `latest` is the symbol's last stored candle. */
+const toSymbol = (r: SymbolRow, latest: StoredCandle | undefined) => ({
   id: r.id,
   source: r.source,
   ticker: r.ticker,
   status: r.status,
   error: r.error,
   lastRefreshedAt: r.last_refreshed_at,
+  quotedAt: latest?.provisional ? r.quoted_at : null,
 })
 
 const bodyOf = (req: { body: unknown }) => (req.body ?? {}) as Record<string, unknown>
@@ -73,7 +77,7 @@ function parseRange(body: Record<string, unknown>) {
 
 export function buildApp(
   db: Db,
-  opts: { webDir?: string; logger?: boolean; market?: Pick<Market, 'refreshIfStale'> } = {},
+  opts: { webDir?: string; logger?: boolean; market?: Pick<Market, 'refreshIfStale' | 'clientSeen'> } = {},
 ): FastifyInstance {
   const app = Fastify({ logger: opts.logger ?? false })
 
@@ -113,11 +117,12 @@ export function buildApp(
       id: w.id,
       name: w.name,
       items: rows.map((row) => {
-        const candles = adjust((lastTwo.all(row.id) as CandleRow[]).reverse())
+        const stored = (lastTwo.all(row.id) as StoredCandle[]).reverse()
+        const candles = adjust(stored)
         const last = candles.at(-1)
         return {
           id: row.item_id,
-          symbol: toSymbol(row),
+          symbol: toSymbol(row, stored.at(-1)),
           lastClose: last?.close ?? null,
           changePct: changePct(candles),
           lastDate: last?.time ?? null,
@@ -131,9 +136,10 @@ export function buildApp(
 
   app.register(
     async (api) => {
-      api.get('/watchlists', () =>
-        (db.prepare('SELECT id, name FROM watchlists ORDER BY position, id').all() as WatchlistRow[]).map(withItems),
-      )
+      api.get('/watchlists', () => {
+        opts.market?.clientSeen()
+        return (db.prepare('SELECT id, name FROM watchlists ORDER BY position, id').all() as WatchlistRow[]).map(withItems)
+      })
 
       api.post('/watchlists', (req, reply) => {
         const name = parseName(bodyOf(req))
@@ -210,8 +216,8 @@ export function buildApp(
           await opts.market.refreshIfStale(symbol.id)
           symbol = getSymbol(req.params.id)
         }
-        const rows = db.prepare('SELECT * FROM candles WHERE symbol_id = ? ORDER BY date').all(symbol.id) as CandleRow[]
-        return { symbol: toSymbol(symbol), candles: aggregate(adjust(rows), tf) }
+        const rows = db.prepare('SELECT * FROM candles WHERE symbol_id = ? ORDER BY date').all(symbol.id) as StoredCandle[]
+        return { symbol: toSymbol(symbol, rows.at(-1)), candles: aggregate(adjust(rows), tf) }
       })
 
       api.get<IdParams>('/symbols/:id/lines', (req) => {

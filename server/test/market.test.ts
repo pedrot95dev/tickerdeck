@@ -1,7 +1,7 @@
 import { beforeEach, expect, test } from 'vitest'
 import { buildApp } from '../src/app.js'
 import { openDb, type Db } from '../src/db.js'
-import { createMarket, stocksDueDay } from '../src/market.js'
+import { createMarket, quoteHours, stocksDueDay } from '../src/market.js'
 import { fakeFetch } from './fake-fetch.js'
 
 const MINUTE = 60_000
@@ -661,6 +661,89 @@ test('crypto refresh runs every 15 minutes and upserts the running day', async (
   expect(symbol(id).last_refreshed_at).toBe(new Date(now).toISOString())
 })
 
+test('crypto refresh runs every 10 s while a client has asked for the watchlists in the last minute', async () => {
+  const id = addSymbol('binance', 'BTCUSDT', '2025-01-08T11:59:00Z')
+  addCandle(id, '2025-01-08', 101)
+  const stock = addSymbol('tiingo', 'AAPL', '2025-01-08T02:01:00Z')
+  addCandle(stock, '2025-01-07', 20)
+  let close = 102
+  const { market, calls } = setup(() => ({ body: [kline('2025-01-08', close)] }))
+  const app = buildApp(db, { market })
+  const tickAfter = async (ms: number) => {
+    now += ms
+    await market.tick()
+  }
+
+  await market.tick() // startup
+  await tickAfter(10_000)
+  expect(calls).toHaveLength(1) // nobody is watching
+
+  close = 103
+  await app.inject({ url: '/api/watchlists' })
+  await market.tick()
+  expect(calls).toHaveLength(2)
+  expect(closes(id).at(-1)).toEqual({ date: '2025-01-08', close: 103 })
+  expect(symbol(id).last_refreshed_at).toBe(new Date(now).toISOString())
+
+  await tickAfter(5_000)
+  expect(calls).toHaveLength(2)
+  await tickAfter(5_000)
+  expect(calls).toHaveLength(3)
+  await tickAfter(5_000)
+  await tickAfter(5_000)
+  expect(calls).toHaveLength(4)
+
+  // The client is gone: 60 s after its last request the pace is 15 minutes again.
+  await tickAfter(40_000)
+  expect(calls).toHaveLength(5)
+  await tickAfter(10_000)
+  expect(calls).toHaveLength(5)
+  await tickAfter(15 * MINUTE - 10_001)
+  expect(calls).toHaveLength(5)
+  await tickAfter(1)
+  expect(calls).toHaveLength(6)
+  expect(calls.every((c) => c.url.includes('binance'))).toBe(true)
+})
+
+test('a Binance pause holds back the 10 s crypto refresh too', async () => {
+  const id = addSymbol('binance', 'BTCUSDT', '2025-01-08T11:59:00Z')
+  addCandle(id, '2025-01-08', 101)
+  let limited = true
+  const { market, calls } = setup(() => (limited ? { status: 429, body: {} } : { body: [kline('2025-01-08', 102)] }))
+  const app = buildApp(db, { market })
+
+  await market.tick()
+  expect(calls).toHaveLength(1)
+
+  limited = false
+  for (let elapsed = 10_000; elapsed < 15 * MINUTE; elapsed += 10_000) {
+    now += 10_000
+    await app.inject({ url: '/api/watchlists' })
+    await market.tick()
+  }
+  expect(calls).toHaveLength(1)
+
+  now += 10_000
+  await market.tick()
+  expect(calls).toHaveLength(2)
+  expect(closes(id)).toEqual([{ date: '2025-01-08', close: 102 }])
+})
+
+test('a crypto pass that outlasts the next tick is not run twice at once', async () => {
+  addCandle(addSymbol('binance', 'BTCUSDT', '2025-01-08T11:59:00Z'), '2025-01-08', 101)
+  const { market, calls } = setup(() => ({ body: [kline('2025-01-08', 102)] }))
+  market.clientSeen()
+
+  const slow = market.tick()
+  now += 10_000
+  await market.tick() // the first pass is still waiting for Binance
+  await slow
+  expect(calls).toHaveLength(1)
+
+  await market.tick()
+  expect(calls).toHaveLength(2)
+})
+
 // --- refresh on read ---
 
 test('GET candles refreshes a Binance symbol only when its last refresh is older than 60 s', async () => {
@@ -685,9 +768,9 @@ test('GET candles refreshes a Binance symbol only when its last refresh is older
   await get(id)
   expect(calls).toHaveLength(1)
 
-  now += DAY
+  now += 3 * DAY // a Saturday
   await get(stock)
-  expect(calls).toHaveLength(1) // stocks are never refreshed on read
+  expect(calls).toHaveLength(1) // outside market hours a stock is not requested on read
   await Promise.all([get(id), get(id), get(id)])
   expect(calls).toHaveLength(2) // concurrent reads share one refresh
 })
@@ -699,4 +782,365 @@ test('GET candles still answers with stored data when the refresh fails', async 
   const res = await buildApp(db, { market }).inject({ url: `/api/symbols/${id}/candles` })
   expect(res.statusCode).toBe(200)
   expect(res.json()).toMatchObject({ symbol: { status: 'ready', lastRefreshedAt: '2025-01-08T11:00:00.000Z' }, candles: [{ close: 100 }] })
+})
+
+// --- stock quote on read ---
+
+type Answer = ReturnType<Respond>
+const QUOTE_TIME = '2025-01-08T15:00:00+00:00'
+const iex = (timestamp: string, last: number, over: Record<string, unknown> = {}) => ({
+  ticker: 'AAPL',
+  timestamp,
+  open: last - 1,
+  high: last + 1,
+  low: last - 2,
+  tngoLast: last,
+  last: null,
+  volume: 500,
+  prevClose: 11,
+  ...over,
+})
+
+/** Wednesday 15:00 UTC with a stock that is up to date: official candles to Tuesday, refreshed after its cut-off. */
+function quoteSetup(quote: () => Answer, eod: () => Answer = () => ({ body: [] }), token: string | null = TOKEN) {
+  now = at('2025-01-08T15:00:00Z')
+  const id = addSymbol('tiingo', 'AAPL', '2025-01-08T02:01:00Z')
+  addCandle(id, '2025-01-06', 10)
+  addCandle(id, '2025-01-07', 11)
+  const { market, calls } = setup((url) => (url.pathname === '/iex/' ? quote() : eod()), token)
+  const app = buildApp(db, { market })
+  const read = (symbolId = id, tf = 'D') => app.inject({ url: `/api/symbols/${symbolId}/candles?tf=${tf}` })
+  const quotes = () => calls.filter((c) => c.url.startsWith('https://api.tiingo.com/iex/'))
+  return { id, market, app, calls, read, quotes }
+}
+
+const stored = (id: number) =>
+  db.prepare('SELECT date, close, provisional, split_factor FROM candles WHERE symbol_id = ? ORDER BY date').all(id)
+const quotedAt = (id: number) => db.prepare('SELECT quoted_at FROM symbols WHERE id = ?').pluck().get(id)
+const official = (date: string, close: number) => ({ date, close, provisional: 0, split_factor: 1 })
+const provisional = (date: string, close: number) => ({ date, close, provisional: 1, split_factor: 1 })
+
+test('GET candles of a stock during market hours stores a quote as the provisional candle of its day', async () => {
+  const { id, app, read, quotes, calls } = quoteSetup(() => ({ body: [iex(QUOTE_TIME, 30)] }))
+
+  const res = await read()
+
+  expect(calls).toHaveLength(1)
+  expect(quotes()).toEqual([
+    { url: 'https://api.tiingo.com/iex/?tickers=AAPL', headers: { Authorization: `Token ${TOKEN}`, 'Content-Type': 'application/json' } },
+  ])
+  expect(res.statusCode).toBe(200)
+  expect(res.json().candles.at(-1)).toEqual({ time: '2025-01-08', open: 29, high: 31, low: 28, close: 30, volume: 500 })
+  expect(res.json().symbol).toMatchObject({ status: 'ready', quotedAt: QUOTE_TIME, lastRefreshedAt: '2025-01-08T02:01:00.000Z' })
+  expect(stored(id)).toEqual([official('2025-01-06', 10), official('2025-01-07', 11), provisional('2025-01-08', 30)])
+  // The end-of-day schedule goes by last_refreshed_at: a quote must leave it alone.
+  expect(symbol(id)).toEqual({ status: 'ready', error: null, last_refreshed_at: '2025-01-08T02:01:00.000Z' })
+
+  // Weekly and monthly candles include the running day.
+  expect((await read(id, 'W')).json().candles).toEqual([{ time: '2025-01-06', open: 10, high: 31, low: 10, close: 30, volume: 502 }])
+  expect((await read(id, 'M')).json().candles.at(-1)).toMatchObject({ close: 30 })
+
+  db.prepare("INSERT INTO watchlists(name, position) VALUES ('Main', 1)").run()
+  db.prepare('INSERT INTO watchlist_items(watchlist_id, symbol_id, position) VALUES (1, ?, 1)').run(id)
+  const [item] = (await app.inject({ url: '/api/watchlists' })).json()[0].items
+  expect(item).toMatchObject({ lastClose: 30, lastDate: '2025-01-08', symbol: { quotedAt: QUOTE_TIME } })
+  expect(item.changePct).toBeCloseTo((30 / 11 - 1) * 100)
+  expect(quotes()).toHaveLength(1)
+})
+
+test('quoteHours is Monday to Friday from 12:00 to 22:00 UTC', () => {
+  expect(quoteHours(at('2025-01-06T11:59:59Z'))).toBe(false) // Monday
+  expect(quoteHours(at('2025-01-06T12:00:00Z'))).toBe(true)
+  expect(quoteHours(at('2025-01-10T21:59:59Z'))).toBe(true) // Friday
+  expect(quoteHours(at('2025-01-10T22:00:00Z'))).toBe(false)
+  expect(quoteHours(at('2025-01-11T15:00:00Z'))).toBe(false) // Saturday
+  expect(quoteHours(at('2025-01-12T15:00:00Z'))).toBe(false) // Sunday
+})
+
+test.each([
+  ['2025-01-08T11:59:59Z', 0],
+  ['2025-01-08T12:00:00Z', 1],
+  ['2025-01-08T21:59:59Z', 1],
+  ['2025-01-08T22:00:00Z', 0],
+  ['2025-01-11T15:00:00Z', 0],
+  ['2025-01-12T15:00:00Z', 0],
+])('a stock read at %s asks for %i quotes', async (time, expected) => {
+  const { read, calls } = quoteSetup(() => ({ body: [iex(QUOTE_TIME, 30)] }))
+  db.prepare('UPDATE symbols SET last_refreshed_at = ?').run(new Date(at(time)).toISOString()) // keeps it off the end-of-day queue
+  now = at(time)
+  expect((await read()).statusCode).toBe(200)
+  expect(calls).toHaveLength(expected)
+})
+
+test('no quote is asked for without a token', async () => {
+  const { id, read, calls } = quoteSetup(() => ({ body: [iex(QUOTE_TIME, 30)] }), undefined, null)
+  expect((await read()).json().symbol.quotedAt).toBeNull()
+  expect(calls).toHaveLength(0)
+  expect(stored(id)).toHaveLength(2)
+})
+
+test('no quote is asked for a symbol that is not a ready stock', async () => {
+  const { read, calls } = quoteSetup(() => ({ body: [iex(QUOTE_TIME, 30)] }))
+  const pending = addSymbol('tiingo', 'MSFT')
+  const failed = addSymbol('tiingo', 'NOPE')
+  db.prepare("UPDATE symbols SET status = 'error', error = 'Unknown ticker' WHERE id = ?").run(failed)
+  const coin = addSymbol('binance', 'BTCUSDT', '2025-01-08T15:00:00Z')
+  addCandle(coin, '2025-01-08', 100)
+  for (const symbolId of [pending, failed, coin]) expect((await read(symbolId)).statusCode).toBe(200)
+  expect(calls).toHaveLength(0)
+})
+
+test('a stock is quoted at most once every 60 s, whatever the outcome', async () => {
+  let answer: Answer = { status: 500, body: {} }
+  const { id, read, quotes } = quoteSetup(() => answer)
+
+  await read()
+  expect(quotes()).toHaveLength(1)
+  answer = { body: [iex(QUOTE_TIME, 30)] }
+  now += MINUTE
+  await read()
+  expect(quotes()).toHaveLength(1)
+  expect(stored(id)).toHaveLength(2)
+
+  now += 1
+  await read()
+  expect(quotes()).toHaveLength(2)
+  expect(stored(id).at(-1)).toEqual(provisional('2025-01-08', 30))
+
+  // The limit is per symbol.
+  const other = addSymbol('tiingo', 'MSFT', '2025-01-08T02:01:00Z')
+  addCandle(other, '2025-01-07', 50)
+  await read(other)
+  expect(quotes()).toHaveLength(3)
+})
+
+test('concurrent reads of a stock share one quote request', async () => {
+  const { read, quotes } = quoteSetup(() => ({ body: [iex(QUOTE_TIME, 30)] }))
+  const answers = await Promise.all([read(), read(), read()])
+  expect(quotes()).toHaveLength(1)
+  for (const res of answers) expect(res.json().candles.at(-1)).toMatchObject({ time: '2025-01-08', close: 30 })
+})
+
+test('no quote is asked for when the Tiingo budget is used up, and the read is not held against the symbol', async () => {
+  const { id, read, calls } = quoteSetup(() => ({ body: [iex(QUOTE_TIME, 30)] }))
+  for (let i = 0; i < 45; i++) db.prepare('INSERT INTO tiingo_requests(at) VALUES (?)').run(now - 30 * MINUTE)
+
+  expect((await read()).statusCode).toBe(200)
+  expect(calls).toHaveLength(0)
+  expect(stored(id)).toHaveLength(2)
+
+  now += 30 * MINUTE
+  await read()
+  expect(calls).toHaveLength(1)
+})
+
+test('no quote is asked for while Tiingo is paused', async () => {
+  const { market, read, calls, quotes } = quoteSetup(
+    () => ({ body: [iex(QUOTE_TIME, 30)] }),
+    () => ({ status: 429, body: {} }),
+  )
+  addSymbol('tiingo', 'MSFT')
+  await market.tick() // the download of MSFT is rate-limited: Tiingo is paused for 15 minutes
+  expect(calls).toHaveLength(1)
+
+  now += 15 * MINUTE - 1
+  await read()
+  expect(quotes()).toHaveLength(0)
+  now += 1
+  await read()
+  expect(quotes()).toHaveLength(1)
+})
+
+test('no quote is asked for a stock that is in back-off', async () => {
+  const { id, market, read, calls, quotes } = quoteSetup(
+    () => ({ body: [iex(QUOTE_TIME, 30)] }),
+    () => ({ status: 404, body: {} }),
+  )
+  db.prepare("UPDATE symbols SET last_refreshed_at = '2025-01-03T22:31:00.000Z' WHERE id = ?").run(id)
+  await market.tick() // its end-of-day refresh fails: next try in a minute
+  expect(calls).toHaveLength(1)
+
+  now += MINUTE - 1
+  await read()
+  expect(quotes()).toHaveLength(0)
+  now += 1
+  await read()
+  expect(quotes()).toHaveLength(1)
+})
+
+test('a quote never replaces an official candle', async () => {
+  let answer = iex('2025-01-07T21:00:00+00:00', 30) // the last session, as Tiingo may answer before the open
+  const { id, read, quotes } = quoteSetup(() => ({ body: [answer] }))
+
+  expect((await read()).json()).toMatchObject({ symbol: { quotedAt: null }, candles: [{ close: 10 }, { close: 11 }] })
+  expect(quotes()).toHaveLength(1)
+  expect(stored(id)).toEqual([official('2025-01-06', 10), official('2025-01-07', 11)])
+  expect(quotedAt(id)).toBeNull()
+
+  // Nor does it add a day before the last official one.
+  db.prepare("DELETE FROM candles WHERE date = '2025-01-06'").run()
+  answer = iex('2025-01-06T21:00:00+00:00', 30)
+  now += MINUTE + 1
+  await read()
+  expect(quotes()).toHaveLength(2)
+  expect(stored(id)).toEqual([official('2025-01-07', 11)])
+  expect(quotedAt(id)).toBeNull()
+})
+
+test('a later quote replaces the provisional candle', async () => {
+  let answer = iex(QUOTE_TIME, 30, { volume: null })
+  const { id, read } = quoteSetup(() => ({ body: [answer] }))
+  await read()
+  expect(stored(id).at(-1)).toEqual(provisional('2025-01-08', 30))
+  expect(db.prepare("SELECT volume FROM candles WHERE date = '2025-01-08'").pluck().get()).toBe(0)
+
+  answer = iex('2025-01-08T15:01:01+00:00', 32)
+  now += MINUTE + 1
+  const res = await read()
+  expect(res.json().symbol.quotedAt).toBe('2025-01-08T15:01:01+00:00')
+  expect(res.json().candles.at(-1)).toMatchObject({ time: '2025-01-08', close: 32, volume: 500 })
+  expect(stored(id)).toEqual([official('2025-01-06', 10), official('2025-01-07', 11), provisional('2025-01-08', 32)])
+})
+
+test('a quote for a day that is never published is dropped once a later official candle arrives', async () => {
+  let rows = [tiingoRow('2025-01-07', 11)]
+  const { id, market, read } = quoteSetup(
+    () => ({ body: [iex(QUOTE_TIME, 30)] }),
+    () => ({ body: rows }),
+  )
+  await read()
+  expect(stored(id).at(-1)).toEqual(provisional('2025-01-08', 30))
+
+  // Wednesday turns out to be a holiday: its cut-off brings nothing, Thursday's brings Thursday only.
+  now = at('2025-01-09T02:00:00Z')
+  await market.tick()
+  expect(stored(id).at(-1)).toEqual(provisional('2025-01-08', 30))
+  rows = [tiingoRow('2025-01-07', 11), tiingoRow('2025-01-09', 12)]
+  now = at('2025-01-10T02:00:00Z')
+  await market.tick()
+  expect(stored(id)).toEqual([official('2025-01-06', 10), official('2025-01-07', 11), official('2025-01-09', 12)])
+  expect(quotedAt(id)).toBeNull()
+})
+
+test('the end-of-day download replaces the provisional candle with the official one and clears the quote time', async () => {
+  let published = false
+  const { id, market, read, calls } = quoteSetup(
+    () => ({ body: [iex(QUOTE_TIME, 30)] }),
+    () => ({ body: published ? [tiingoRow('2025-01-07', 11), tiingoRow('2025-01-08', 31, 2)] : [tiingoRow('2025-01-07', 11)] }),
+  )
+  await read()
+  await market.tick()
+  now = at('2025-01-09T01:59:59Z')
+  await market.tick()
+  expect(calls).toHaveLength(1) // the quote: the stock is not due before the day's cut-off
+
+  // Wednesday is not published at its cut-off: the provisional candle stays.
+  now = at('2025-01-09T02:00:00Z')
+  await market.tick()
+  expect(calls).toHaveLength(2)
+  expect(startDate(calls[1])).toBe('2025-01-07') // from the last official day
+  expect(stored(id).at(-1)).toEqual(provisional('2025-01-08', 30))
+  expect(quotedAt(id)).toBe(QUOTE_TIME)
+  expect((await read()).json().symbol.quotedAt).toBe(QUOTE_TIME)
+
+  // The retry 6 hours later goes by the latest official candle, not by the provisional one.
+  published = true
+  now += 6 * HOUR
+  await market.tick()
+  expect(calls).toHaveLength(2)
+  now += 1
+  await market.tick()
+  expect(calls).toHaveLength(3)
+  expect(startDate(calls[2])).toBe('2025-01-07')
+  expect(stored(id)).toEqual([
+    official('2025-01-06', 10),
+    official('2025-01-07', 11),
+    { date: '2025-01-08', close: 31, provisional: 0, split_factor: 2 },
+  ])
+  expect(quotedAt(id)).toBeNull()
+  expect(symbol(id).last_refreshed_at).toBe(new Date(now).toISOString())
+  const res = await read()
+  expect(res.json().symbol.quotedAt).toBeNull()
+  expect(res.json().candles.at(-1)).toMatchObject({ time: '2025-01-08', close: 31 })
+
+  now += 7 * HOUR
+  await market.tick()
+  expect(calls).toHaveLength(3)
+})
+
+test.each([
+  ['an HTTP 500', () => ({ status: 500, body: {} }), 'Tiingo answered HTTP 500'],
+  ['an unknown ticker', () => ({ status: 404, body: {} }), 'Unknown ticker'],
+  ['an unexpected body', () => ({ body: { detail: 'x' } }), 'Tiingo answered with an unexpected body'],
+] as const)('a quote failing with %s leaves the read, the symbol and the other downloads alone', async (_name, fail, reason) => {
+  const { id, market, read, calls } = quoteSetup(fail, () => ({ body: [tiingoRow('2025-01-07', 50)] }))
+
+  const res = await read()
+  expect(res.statusCode).toBe(200)
+  expect(res.json()).toMatchObject({ symbol: { status: 'ready', error: null, quotedAt: null }, candles: [{ close: 10 }, { close: 11 }] })
+  expect(symbol(id)).toEqual({ status: 'ready', error: null, last_refreshed_at: '2025-01-08T02:01:00.000Z' })
+  expect(stored(id)).toHaveLength(2)
+  expect(logs).toEqual([`Quote failed for tiingo:AAPL: ${reason}`])
+
+  // Neither Tiingo nor the symbol is held back by it.
+  const other = addSymbol('tiingo', 'MSFT')
+  await market.tick()
+  expect(symbol(other).status).toBe('ready')
+  now = at('2025-01-09T02:00:00Z')
+  await market.tick()
+  expect(calls.filter((c) => c.url.includes('/daily/AAPL/'))).toHaveLength(1)
+})
+
+test('a quote without usable prices stores nothing', async () => {
+  const { id, read } = quoteSetup(() => ({ body: [iex(QUOTE_TIME, 30, { open: null, high: null, low: null })] }))
+  expect((await read()).json()).toMatchObject({ symbol: { quotedAt: null }, candles: [{ close: 10 }, { close: 11 }] })
+  expect(stored(id)).toHaveLength(2)
+  expect(logs).toEqual([])
+})
+
+test.each([429, 401])('a quote answered with HTTP %i pauses Tiingo for 15 minutes without marking any symbol', async (status) => {
+  let quoteStatus: number = status
+  const { id, market, read, calls } = quoteSetup(
+    () => (quoteStatus === 200 ? { body: [iex(QUOTE_TIME, 30)] } : { status: quoteStatus, body: {} }),
+    () => ({ body: [tiingoRow('2025-01-07', 50)] }),
+  )
+  const other = addSymbol('tiingo', 'MSFT')
+
+  expect((await read()).statusCode).toBe(200)
+  expect(calls).toHaveLength(1)
+  expect(symbol(id).status).toBe('ready')
+
+  quoteStatus = 200
+  now += 15 * MINUTE - 1
+  await market.tick()
+  await read()
+  expect(calls).toHaveLength(1)
+  expect(symbol(other)).toEqual({ status: 'pending', error: null, last_refreshed_at: null })
+
+  now += 1
+  await market.tick()
+  await read()
+  expect(calls).toHaveLength(3)
+  expect(symbol(other).status).toBe('ready')
+  expect(quotedAt(id)).toBe(QUOTE_TIME)
+})
+
+test('a quote that could not reach Tiingo is given back to the request budget', async () => {
+  const { id, read } = quoteSetup(() => {
+    throw new TypeError('fetch failed')
+  })
+  expect((await read()).statusCode).toBe(200)
+  expect(db.prepare('SELECT COUNT(*) FROM tiingo_requests').pluck().get()).toBe(0)
+  expect(symbol(id).status).toBe('ready')
+  expect(logs).toEqual(['Quote failed for tiingo:AAPL: fetch failed'])
+})
+
+test('a quote for a stock removed meanwhile is not stored', async () => {
+  const { id, market } = quoteSetup(() => {
+    db.prepare('DELETE FROM symbols WHERE id = ?').run(id)
+    return { body: [iex(QUOTE_TIME, 30)] }
+  })
+  await market.refreshIfStale(id)
+  expect(db.prepare('SELECT COUNT(*) FROM candles').pluck().get()).toBe(0)
+  expect(logs).toEqual([])
 })
