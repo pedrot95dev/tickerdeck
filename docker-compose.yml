@@ -1,6 +1,6 @@
 services:
   tickerdeck:
-    build: .
+    image: ghcr.io/pedrot95dev/tickerdeck:latest
     env_file: .env
     ports:
       - "8080:8080"

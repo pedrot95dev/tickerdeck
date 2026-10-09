@@ -39,15 +39,19 @@ npm start          # everything on http://localhost:8080
 
 ## Deploy
 
-Needs Docker with Compose.
+Needs Docker with Compose. Every push to `main` publishes the image `ghcr.io/pedrot95dev/tickerdeck:latest`
+(Intel/AMD and ARM), so the host needs only `docker-compose.yml` and `.env`, not the source.
 
 ```
 cp .env.example .env     # then add the token
 mkdir -p data
-docker compose up -d --build
+docker compose up -d
 ```
 
-Open `http://<host>:8080`. Update with `git pull && docker compose up -d --build`.
+Open `http://<host>:8080`. Update with `docker compose pull && docker compose up -d`.
+
+To run an image built from local source instead:
+`docker build -t ghcr.io/pedrot95dev/tickerdeck:latest . && docker compose up -d`.
 
 The container runs as a non-root user (uid 1000). On a Linux host the `data` folder must be
 writable by that user: `sudo chown 1000:1000 data`.
