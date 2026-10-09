@@ -8,6 +8,8 @@ export type SymbolInfo = {
   status: 'pending' | 'ready' | 'error'
   error: string | null
   lastRefreshedAt: string | null
+  /** Time of the intraday quote when the last candle is one, otherwise null. */
+  quotedAt: string | null
 }
 export type WatchlistItem = {
   id: number

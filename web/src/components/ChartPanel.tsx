@@ -23,27 +23,34 @@ type Props = {
   settings: IndicatorSettings
   onSettings: (settings: IndicatorSettings) => void
   onError: (e: unknown) => void
+  /** The server stored a quote the watchlists do not show yet. */
+  onQuote: () => void
 }
 
 /** Rendered with `key={symbol.id}`, so all state here belongs to one symbol. */
-export function ChartPanel({ symbol, lastDate, tf, onTf, settings, onSettings, onError }: Props) {
+export function ChartPanel({ symbol, lastDate, tf, onTf, settings, onSettings, onError, onQuote }: Props) {
   const [loaded, setLoaded] = useState<{ tf: Timeframe; candles: Candle[] } | null>(null)
   const [lines, setLines] = useState<Line[]>([])
   const [ranges, setRanges] = useState<Range[]>([])
   const [mode, setMode] = useState<'line' | 'measure' | null>(null)
   const [showSettings, setShowSettings] = useState(false)
 
-  // lastRefreshedAt is a dependency so that a refresh seen by the sidebar poll reloads the chart.
+  // lastRefreshedAt and quotedAt are dependencies so that a refresh seen by the sidebar poll reloads the chart.
+  // Reading the candles of a stock can itself store a quote; the watchlists are then reloaded at once, so that
+  // the sidebar and the header show it and the next poll finds nothing new (a reload on a timer would turn
+  // into a quote request on a timer).
   useEffect(() => {
     if (symbol.status !== 'ready') return
     let stale = false
     api.getCandles(symbol.id, tf).then((r) => {
-      if (!stale) setLoaded({ tf, candles: r.candles })
+      if (stale) return
+      setLoaded({ tf, candles: r.candles })
+      if (r.symbol.quotedAt !== symbol.quotedAt) onQuote()
     }, onError)
     return () => {
       stale = true
     }
-  }, [symbol.id, symbol.status, symbol.lastRefreshedAt, tf, onError])
+  }, [symbol.id, symbol.status, symbol.lastRefreshedAt, symbol.quotedAt, tf, onError, onQuote])
 
   useEffect(() => {
     api.getLines(symbol.id).then(setLines, onError)
@@ -113,7 +120,7 @@ export function ChartPanel({ symbol, lastDate, tf, onTf, settings, onSettings, o
     <section className="chart-panel">
       <header className="chart-header">
         <h1>{symbol.ticker}</h1>
-        <span className="muted">{formatDataTo(lastDate)}</span>
+        <span className="muted">{formatDataTo(lastDate, symbol.quotedAt)}</span>
         <div className="group timeframes">
           {TIMEFRAMES.map((t) => (
             <button key={t} className={t === tf ? 'active' : ''} aria-pressed={t === tf} onClick={() => onTf(t)}>

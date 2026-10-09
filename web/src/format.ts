@@ -25,6 +25,24 @@ export function candleTime(candles: { time: string }[], date: string): string {
   return (candles.findLast((c) => c.time <= date) ?? candles[0]).time
 }
 
+type Ohlcv = { time: string; open: number; high: number; low: number; close: number; volume: number }
+
+/** True when `next` is `prev` with at most its last candle changed and one candle added after it. */
+export function onlyTailChanged(prev: Ohlcv[], next: Ohlcv[]): boolean {
+  const last = prev.length - 1
+  if (last < 0 || (next.length !== prev.length && next.length !== prev.length + 1)) return false
+  if (next[last].time !== prev[last].time) return false
+  if (next.length > prev.length && next[last + 1].time <= prev[last].time) return false
+  for (let i = 0; i < last; i++) {
+    const a = prev[i]
+    const b = next[i]
+    if (a.time !== b.time || a.open !== b.open || a.high !== b.high || a.low !== b.low || a.close !== b.close || a.volume !== b.volume) {
+      return false
+    }
+  }
+  return true
+}
+
 const DAY = 86_400_000
 const STALE_AFTER_DAYS = 5
 
@@ -38,8 +56,16 @@ function formatDate(date: string, withYear: boolean): string {
   })
 }
 
-/** `lastDate` is the date of the last daily candle. */
-export function formatDataTo(lastDate: string | null): string {
+/**
+ * `lastDate` is the date of the last daily candle. When that candle is an intraday quote, `quotedAt` is its
+ * time, shown in the browser's time zone (`timeZone` overrides it).
+ */
+export function formatDataTo(lastDate: string | null, quotedAt: string | null = null, timeZone?: string): string {
+  if (quotedAt) {
+    const at = new Date(quotedAt)
+    const time = at.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone })
+    return `price at ${time} ${at.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', timeZone })}`
+  }
   return lastDate ? `data to ${formatDate(lastDate, true)}` : 'not updated yet'
 }
 

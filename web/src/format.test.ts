@@ -1,5 +1,14 @@
 import { expect, test } from 'vitest'
-import { candleTime, formatDataTo, formatPct, formatPrice, formatRange, pricePrecision, staleDate } from './format'
+import {
+  candleTime,
+  formatDataTo,
+  formatPct,
+  formatPrice,
+  formatRange,
+  onlyTailChanged,
+  pricePrecision,
+  staleDate,
+} from './format'
 
 test('pricePrecision uses 2 decimals from 1 upwards and more below', () => {
   expect(pricePrecision(64123.5)).toBe(2)
@@ -40,9 +49,38 @@ test('candleTime maps a daily date to the candle whose bucket contains it', () =
   expect(candleTime(weekly, '2026-05-01')).toBe('2025-01-20') // after the last candle
 })
 
+test('onlyTailChanged accepts a changed last candle and one appended candle, nothing else', () => {
+  const candle = (time: string, close: number) => ({ time, open: 1, high: 2, low: 0.5, close, volume: 10 })
+  const prev = [candle('2025-01-06', 10), candle('2025-01-07', 11), candle('2025-01-08', 12)]
+  const withLast = (...last: ReturnType<typeof candle>[]) => [...prev.slice(0, 2), ...last]
+
+  expect(onlyTailChanged(prev, withLast(candle('2025-01-08', 12)))).toBe(true)
+  expect(onlyTailChanged(prev, withLast(candle('2025-01-08', 13)))).toBe(true)
+  expect(onlyTailChanged(prev, withLast(candle('2025-01-08', 13), candle('2025-01-09', 14)))).toBe(true)
+
+  expect(onlyTailChanged(prev, withLast(candle('2025-01-08', 13), candle('2025-01-09', 14), candle('2025-01-10', 15)))).toBe(false)
+  expect(onlyTailChanged(prev, prev.slice(0, 2))).toBe(false)
+  expect(onlyTailChanged(prev, withLast(candle('2025-01-09', 12)))).toBe(false)
+  expect(onlyTailChanged(prev, [candle('2025-01-06', 10), candle('2025-01-07', 11.5), candle('2025-01-08', 12)])).toBe(false)
+  expect(onlyTailChanged(prev, [{ ...prev[0], volume: 11 }, prev[1], prev[2]])).toBe(false)
+  expect(onlyTailChanged(prev, prev.slice(1))).toBe(false)
+  expect(onlyTailChanged([], [candle('2025-01-06', 10)])).toBe(false)
+})
+
 test('formatDataTo shows the date of the last candle', () => {
   expect(formatDataTo(null)).toBe('not updated yet')
   expect(formatDataTo('2026-10-08')).toBe('data to 8 Oct 2026')
+  expect(formatDataTo('2026-10-08', null)).toBe('data to 8 Oct 2026')
+})
+
+test('formatDataTo shows the local time of an intraday quote instead', () => {
+  const quotedAt = '2026-10-08T19:05:00+00:00'
+  expect(formatDataTo('2026-10-08', quotedAt, 'UTC')).toBe('price at 19:05 8 Oct')
+  expect(formatDataTo('2026-10-08', quotedAt, 'Europe/Lisbon')).toBe('price at 20:05 8 Oct')
+  expect(formatDataTo('2026-10-08', quotedAt, 'Asia/Tokyo')).toBe('price at 04:05 9 Oct')
+  const local = new Date(quotedAt)
+  const hhmm = `${String(local.getHours()).padStart(2, '0')}:${String(local.getMinutes()).padStart(2, '0')}`
+  expect(formatDataTo('2026-10-08', quotedAt)).toContain(`price at ${hhmm} ${local.getDate()} `)
 })
 
 test('staleDate dates a last candle more than 5 calendar days old', () => {

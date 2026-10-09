@@ -30,6 +30,7 @@ export function updateMovingAverage(
 }
 
 export function pollInterval(watchlists: Watchlist[]): number {
-  const pending = watchlists.some((w) => w.items.some((i) => i.symbol.status === 'pending'))
-  return pending ? 5_000 : 60_000
+  const symbols = watchlists.flatMap((w) => w.items.map((i) => i.symbol))
+  if (symbols.some((s) => s.status === 'pending')) return 5_000
+  return symbols.some((s) => s.source === 'binance' && s.status === 'ready') ? 10_000 : 60_000
 }

@@ -11,11 +11,13 @@ import {
   type ISeriesPrimitive,
   type LogicalRange,
   type SeriesAttachedParameter,
+  type SeriesDataItemTypeMap,
+  type SeriesType,
   type Time,
 } from 'lightweight-charts'
 import { useEffect, useRef, useState, type PointerEvent } from 'react'
 import type { Candle, IndicatorSettings, Line, Range, RangePoints } from '../api'
-import { candleTime, formatRange, pricePrecision } from '../format'
+import { candleTime, formatRange, onlyTailChanged, pricePrecision } from '../format'
 import { bollinger, ema, macd, rsi, sma } from '../indicators'
 import { maColor } from '../settings'
 
@@ -102,6 +104,8 @@ type ChartApi = {
   series: ISeriesApi<'Candlestick'>
   priceLines: Map<number, IPriceLine>
   ranges: RangesPrimitive
+  /** Re-plots every series from the candle at time `from` on; that one must be the last candle plotted so far. */
+  update: (candles: Candle[], from: string) => void
 }
 
 function build(el: HTMLElement, candles: Candle[], s: IndicatorSettings): ChartApi {
@@ -122,7 +126,22 @@ function build(el: HTMLElement, candles: Candle[], s: IndicatorSettings): ChartA
     wickDownColor: DOWN,
     priceFormat: { type: 'price', precision, minMove: 10 ** -precision },
   })
-  series.setData(candles)
+  const plots: ((current: Candle[], from?: string) => void)[] = []
+  function plot<T extends SeriesType>(
+    target: ISeriesApi<T>,
+    data: (cs: Candle[]) => (SeriesDataItemTypeMap[T] & { time: string })[],
+  ) {
+    const apply = (current: Candle[], from?: string) => {
+      const points = data(current)
+      if (from === undefined) target.setData(points)
+      // update() rewrites the `time` of the object it is given, so it gets a copy.
+      else for (const point of points) if (point.time >= from) target.update({ ...point })
+    }
+    apply(candles)
+    plots.push(apply)
+  }
+
+  plot(series, (cs) => cs)
   const ranges = new RangesPrimitive(precision)
   series.attachPrimitive(ranges)
 
@@ -134,23 +153,23 @@ function build(el: HTMLElement, candles: Candle[], s: IndicatorSettings): ChartA
       lastValueVisible: false,
     })
     volume.priceScale().applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } })
-    volume.setData(
-      candles.map((c) => ({ time: c.time, value: c.volume, color: c.close >= c.open ? `${UP}80` : `${DOWN}80` })),
+    plot(volume, (cs) =>
+      cs.map((c) => ({ time: c.time, value: c.volume, color: c.close >= c.open ? `${UP}80` : `${DOWN}80` })),
     )
   }
 
   s.movingAverages.forEach((ma, i) => {
     if (!ma.enabled) return
-    const data = (ma.type === 'SMA' ? sma : ema)(candles, ma.period)
-    chart.addSeries(LineSeries, { ...overlay, color: maColor(i) }).setData(data)
+    const average = ma.type === 'SMA' ? sma : ema
+    plot(chart.addSeries(LineSeries, { ...overlay, color: maColor(i) }), (cs) => average(cs, ma.period))
   })
 
   if (s.bollinger.enabled) {
-    const bands = bollinger(candles, s.bollinger.period, s.bollinger.stdDev)
     for (const key of ['upper', 'middle', 'lower'] as const) {
-      chart
-        .addSeries(LineSeries, { ...overlay, color: '#78909c', lineStyle: key === 'middle' ? LineStyle.Dashed : LineStyle.Solid })
-        .setData(bands.map((b) => ({ time: b.time, value: b[key] })))
+      plot(
+        chart.addSeries(LineSeries, { ...overlay, color: '#78909c', lineStyle: key === 'middle' ? LineStyle.Dashed : LineStyle.Solid }),
+        (cs) => bollinger(cs, s.bollinger.period, s.bollinger.stdDev).map((b) => ({ time: b.time, value: b[key] })),
+      )
     }
   }
 
@@ -158,7 +177,7 @@ function build(el: HTMLElement, candles: Candle[], s: IndicatorSettings): ChartA
   if (s.rsi.enabled) {
     pane += 1
     const line = chart.addSeries(LineSeries, { ...overlay, lastValueVisible: true, color: '#ab47bc' }, pane)
-    line.setData(rsi(candles, s.rsi.period))
+    plot(line, (cs) => rsi(cs, s.rsi.period))
     for (const price of [70, 30]) {
       line.createPriceLine({ price, color: '#5d606b', lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: false })
     }
@@ -166,16 +185,21 @@ function build(el: HTMLElement, candles: Candle[], s: IndicatorSettings): ChartA
 
   if (s.macd.enabled) {
     pane += 1
-    const data = macd(candles, s.macd.fast, s.macd.slow, s.macd.signal)
-    chart
-      .addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, pane)
-      .setData(data.map((d) => ({ time: d.time, value: d.histogram, color: d.histogram >= 0 ? `${UP}80` : `${DOWN}80` })))
-    chart.addSeries(LineSeries, { ...overlay, color: '#42a5f5' }, pane).setData(data.map((d) => ({ time: d.time, value: d.macd })))
-    chart.addSeries(LineSeries, { ...overlay, color: '#ff7043' }, pane).setData(data.map((d) => ({ time: d.time, value: d.signal })))
+    const data = (cs: Candle[]) => macd(cs, s.macd.fast, s.macd.slow, s.macd.signal)
+    plot(chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, pane), (cs) =>
+      data(cs).map((d) => ({ time: d.time, value: d.histogram, color: d.histogram >= 0 ? `${UP}80` : `${DOWN}80` })),
+    )
+    plot(chart.addSeries(LineSeries, { ...overlay, color: '#42a5f5' }, pane), (cs) =>
+      data(cs).map((d) => ({ time: d.time, value: d.macd })),
+    )
+    plot(chart.addSeries(LineSeries, { ...overlay, color: '#ff7043' }, pane), (cs) =>
+      data(cs).map((d) => ({ time: d.time, value: d.signal })),
+    )
   }
 
   chart.panes().forEach((p, i) => p.setStretchFactor(i === 0 ? 3 : 1))
-  return { chart, series, priceLines: new Map(), ranges }
+  const update = (current: Candle[], from: string) => plots.forEach((apply) => apply(current, from))
+  return { chart, series, priceLines: new Map(), ranges, update }
 }
 
 type Props = {
@@ -193,6 +217,7 @@ export function PriceChart({ candles, settings, lines, ranges, mode, onAddLine, 
   const el = useRef<HTMLDivElement>(null)
   const apiRef = useRef<ChartApi | null>(null)
   const range = useRef<LogicalRange | null>(null)
+  const shown = useRef<{ candles: Candle[]; settings: IndicatorSettings } | null>(null)
   const drag = useRef<{ id: number; line: IPriceLine; moved: boolean } | null>(null)
   const placing = useRef<{ x: number; y: number } | null>(null)
   const measureStart = useRef<{ x: number; y: number; at: number } | null>(null)
@@ -200,18 +225,34 @@ export function PriceChart({ candles, settings, lines, ranges, mode, onAddLine, 
   // The measurement being placed: fixed start, end following the pointer.
   const [draft, setDraft] = useState<RangePoints | null>(null)
 
-  // The chart is rebuilt whenever data or settings change; the zoom/scroll position is carried over.
+  // A refresh of the running candle is drawn in place, so it cannot disturb a drag or a measurement. Any other
+  // change of data or settings rebuilds the chart; the zoom/scroll position is carried over.
   useEffect(() => {
+    const prev = shown.current
+    shown.current = { candles, settings }
+    const current = apiRef.current
+    if (current && prev) {
+      const inPlace =
+        prev.settings === settings &&
+        onlyTailChanged(prev.candles, candles) &&
+        pricePrecision(prev.candles.at(-1)!.close) === pricePrecision(candles.at(-1)!.close)
+      if (inPlace) return current.update(candles, prev.candles.at(-1)!.time)
+      range.current = current.chart.timeScale().getVisibleLogicalRange()
+      current.chart.remove()
+    }
     const api = build(el.current!, candles, settings)
     if (range.current) api.chart.timeScale().setVisibleLogicalRange(range.current)
     apiRef.current = api
     setVersion((v) => v + 1)
-    return () => {
-      range.current = api.chart.timeScale().getVisibleLogicalRange()
-      apiRef.current = null
-      api.chart.remove()
-    }
   }, [candles, settings])
+
+  useEffect(
+    () => () => {
+      apiRef.current?.chart.remove()
+      apiRef.current = null
+    },
+    [],
+  )
 
   useEffect(() => {
     const api = apiRef.current

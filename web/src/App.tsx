@@ -74,6 +74,7 @@ export function App() {
             settings={settings}
             onSettings={saveSettings}
             onError={fail}
+            onQuote={reload}
           />
         ) : (
           <div className="placeholder">Select a ticker from the list.</div>

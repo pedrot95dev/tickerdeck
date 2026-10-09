@@ -51,19 +51,21 @@ test('updateMovingAverage patches only the given index', () => {
   expect(next.rsi).toBe(settings.rsi)
 })
 
-test('pollInterval is 5 s while any symbol is pending, otherwise 60 s', () => {
-  const list = (...statuses: ('pending' | 'ready' | 'error')[]): Watchlist => ({
+test('pollInterval is 5 s while any symbol is pending, 10 s with a ready crypto symbol, otherwise 60 s', () => {
+  const list = (source: 'tiingo' | 'binance', ...statuses: ('pending' | 'ready' | 'error')[]): Watchlist => ({
     id: 1,
     name: 'A',
     items: statuses.map((status, id) => ({
       id,
-      symbol: { id, source: 'binance', ticker: 'X', status, error: null, lastRefreshedAt: null },
+      symbol: { id, source, ticker: 'X', status, error: null, lastRefreshedAt: null, quotedAt: null },
       lastClose: null,
       changePct: null,
       lastDate: null,
     })),
   })
   expect(pollInterval([])).toBe(60_000)
-  expect(pollInterval([list('ready', 'error')])).toBe(60_000)
-  expect(pollInterval([list('ready'), list('error', 'pending')])).toBe(5_000)
+  expect(pollInterval([list('tiingo', 'ready', 'error')])).toBe(60_000)
+  expect(pollInterval([list('binance', 'error')])).toBe(60_000)
+  expect(pollInterval([list('tiingo', 'ready'), list('binance', 'error', 'ready')])).toBe(10_000)
+  expect(pollInterval([list('binance', 'ready'), list('tiingo', 'error', 'pending')])).toBe(5_000)
 })
