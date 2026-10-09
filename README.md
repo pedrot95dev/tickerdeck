@@ -40,10 +40,10 @@ npm start          # everything on http://localhost:8080
 ## Deploy
 
 Needs Docker with Compose. Every push to `main` publishes the image `ghcr.io/pedrot95dev/tickerdeck:latest`
-(Intel/AMD and ARM), so the host needs only `docker-compose.yml` and `.env`, not the source.
+(Intel/AMD and ARM), so the host needs only `docker-compose.yml`, not the source. Put the Tiingo token in that file as the value
+of `TIINGO_API_TOKEN` (on the host only, never in a commit), or keep it in a `.env` file next to it.
 
 ```
-cp .env.example .env     # then add the token
 mkdir -p data
 docker compose up -d
 ```

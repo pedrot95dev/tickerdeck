@@ -1,7 +1,10 @@
 services:
   tickerdeck:
     image: ghcr.io/pedrot95dev/tickerdeck:latest
-    env_file: .env
+    environment:
+      # On the server, replace the value with your Tiingo key. Never commit the real key: this repository is public.
+      # Left as is, the key is read from a .env file next to this file.
+      TIINGO_API_TOKEN: ${TIINGO_API_TOKEN:-}
     ports:
       - "8080:8080"
     volumes:
