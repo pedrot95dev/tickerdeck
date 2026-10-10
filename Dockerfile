@@ -19,6 +19,8 @@ RUN npm ci --omit=dev --workspace server --ignore-scripts && mkdir /data
 COPY --from=build /app/server/dist server/dist
 COPY --from=build /app/web/dist web/dist
 EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD ["node", "-e", "fetch(`http://127.0.0.1:${process.env.PORT}/api/health`).then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 # Starts as root only to take ownership of the data folder: a folder mounted from a Linux host
 # belongs to whoever created it there. The server itself runs as the non-root user node.
 ENTRYPOINT ["sh", "-c", "chown -R node:node \"$DATA_DIR\" && exec setpriv --reuid=node --regid=node --init-groups \"$@\"", "--"]

@@ -55,6 +55,9 @@ To run an image built from local source instead:
 
 The container takes ownership of the `data` folder on start (uid 1000), then runs as that non-root user.
 
+`docker compose ps` shows the container as `healthy` once the site answers. If it does not,
+`docker compose logs` shows why.
+
 ## Back up
 
 All state is the single file `data/tickerdeck.db`. Stop the container, copy the file, start again:
