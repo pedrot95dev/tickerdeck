@@ -1,9 +1,66 @@
-import { useState, type FormEvent } from 'react'
+import { useState, type DragEvent, type FormEvent } from 'react'
 import { api, type Watchlist, type WatchlistItem } from '../api'
 import { formatPct, formatPrice, staleDate } from '../format'
+import { moveTo } from '../reorder'
 import { usePersistentState } from '../usePersistentState'
 
 type Run = (action: Promise<unknown>) => Promise<unknown>
+
+/** The row being dragged: a list, or a ticker that can only move within its own list. */
+type Dragged = { listId: number; itemId?: number }
+type Dnd = {
+  dragged: Dragged | null
+  overId: number | null
+  start: (dragged: Dragged) => void
+  over: (id: number | null) => void
+  end: () => void
+}
+
+/**
+ * Makes the row `id` a place to drop the dragged row `draggedId`, one of its siblings `ids`
+ * (null when the dragged row is not a sibling). `marker` is the class showing where it would land.
+ */
+function dropTarget(dnd: Dnd, ids: number[], draggedId: number | null, id: number, onMove: (ids: number[]) => void) {
+  if (draggedId === null || draggedId === id) return { marker: '' }
+  const accept = (e: DragEvent) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    dnd.over(id)
+  }
+  return {
+    marker: dnd.overId !== id ? '' : ids.indexOf(draggedId) < ids.indexOf(id) ? ' drop-after' : ' drop-before',
+    onDragEnter: accept,
+    onDragOver: accept,
+    onDragLeave: (e: DragEvent) => {
+      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) dnd.over(null)
+    },
+    onDrop: (e: DragEvent) => {
+      e.preventDefault()
+      onMove(moveTo(ids, draggedId, id))
+      dnd.end()
+    },
+  }
+}
+
+/** A handle rather than the whole row: Firefox does not start a drag from a button. */
+function Grip({ label, onStart, onEnd }: { label: string; onStart: () => void; onEnd: () => void }) {
+  return (
+    <span
+      className="grip"
+      draggable
+      title="Drag to reorder"
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = 'move'
+        e.dataTransfer.setData('text/plain', label)
+        if (e.currentTarget.parentElement) e.dataTransfer.setDragImage(e.currentTarget.parentElement, 0, 0)
+        onStart()
+      }}
+      onDragEnd={onEnd}
+    >
+      ⠿
+    </span>
+  )
+}
 
 type Props = {
   watchlists: Watchlist[]
@@ -15,6 +72,19 @@ type Props = {
 export function Sidebar({ watchlists, selectedSymbolId, onSelectSymbol, run }: Props) {
   const [collapsed, setCollapsed] = usePersistentState<number[]>('tickerdeck.collapsed', [])
   const [creating, setCreating] = useState(false)
+  const [dragged, setDragged] = useState<Dragged | null>(null)
+  const [overId, setOverId] = useState<number | null>(null)
+  const dnd: Dnd = {
+    dragged,
+    overId,
+    start: setDragged,
+    over: setOverId,
+    end: () => {
+      setDragged(null)
+      setOverId(null)
+    },
+  }
+  const listIds = watchlists.map((w) => w.id)
 
   // Rebuilt from the lists that exist, so ids of deleted lists drop out on every write.
   const setListCollapsed = (id: number, value: boolean) =>
@@ -46,6 +116,10 @@ export function Sidebar({ watchlists, selectedSymbolId, onSelectSymbol, run }: P
               selectedSymbolId={selectedSymbolId}
               onSelectSymbol={onSelectSymbol}
               run={run}
+              dnd={dnd}
+              drop={dropTarget(dnd, listIds, dragged && dragged.itemId === undefined ? dragged.listId : null, list.id, (ids) =>
+                run(api.reorderWatchlists(ids)),
+              )}
             />
           ))}
         </div>
@@ -97,14 +171,19 @@ type SectionProps = {
   selectedSymbolId: number | null
   onSelectSymbol: (id: number) => void
   run: Run
+  dnd: Dnd
+  drop: ReturnType<typeof dropTarget>
 }
 
-function ListSection({ list, collapsed, onCollapse, selectedSymbolId, onSelectSymbol, run }: SectionProps) {
+function ListSection({ list, collapsed, onCollapse, selectedSymbolId, onSelectSymbol, run, dnd, drop }: SectionProps) {
   const [adding, setAdding] = useState(false)
   const [renaming, setRenaming] = useState(false)
+  const { marker, ...dropHandlers } = drop
+  const itemIds = list.items.map((i) => i.id)
+  const draggedItemId = dnd.dragged?.listId === list.id ? (dnd.dragged.itemId ?? null) : null
 
   return (
-    <section className="list">
+    <section className={`list${marker}`} {...dropHandlers}>
       {renaming ? (
         <NameForm
           initial={list.name}
@@ -116,6 +195,7 @@ function ListSection({ list, collapsed, onCollapse, selectedSymbolId, onSelectSy
         />
       ) : (
         <div className="list-header">
+          <Grip label={list.name} onStart={() => dnd.start({ listId: list.id })} onEnd={dnd.end} />
           <button className="list-toggle" aria-expanded={!collapsed} onClick={() => onCollapse(!collapsed)}>
             <span className="muted">{collapsed ? '▸' : '▾'}</span>
             <span className="list-name">{list.name}</span>
@@ -165,6 +245,9 @@ function ListSection({ list, collapsed, onCollapse, selectedSymbolId, onSelectSy
                   onSelect={() => onSelectSymbol(item.symbol.id)}
                   onRetry={() => run(api.retrySymbol(item.symbol.id))}
                   onRemove={() => run(api.removeItem(list.id, item.id))}
+                  onDragStart={() => dnd.start({ listId: list.id, itemId: item.id })}
+                  onDragEnd={dnd.end}
+                  drop={dropTarget(dnd, itemIds, draggedItemId, item.id, (ids) => run(api.reorderItems(list.id, ids)))}
                 />
               ))}
             </ul>
@@ -215,13 +298,18 @@ type RowProps = {
   onSelect: () => void
   onRetry: () => void
   onRemove: () => void
+  onDragStart: () => void
+  onDragEnd: () => void
+  drop: ReturnType<typeof dropTarget>
 }
 
-function ItemRow({ item, selected, onSelect, onRetry, onRemove }: RowProps) {
+function ItemRow({ item, selected, onSelect, onRetry, onRemove, onDragStart, onDragEnd, drop }: RowProps) {
   const { symbol, lastClose, changePct } = item
   const stale = staleDate(item.lastDate, Date.now())
+  const { marker, ...dropHandlers } = drop
   return (
-    <li className={`item${selected ? ' selected' : ''}`}>
+    <li className={`item${selected ? ' selected' : ''}${marker}`} {...dropHandlers}>
+      <Grip label={symbol.ticker} onStart={onDragStart} onEnd={onDragEnd} />
       <button className="item-main" onClick={onSelect}>
         <span className="ticker">{symbol.ticker}</span>
         {symbol.status === 'pending' && <span className="muted">loading</span>}

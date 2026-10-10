@@ -202,6 +202,22 @@ input.invalid {
   white-space: normal;
 }
 
+.grip {
+  padding: 0 2px;
+  color: var(--muted);
+  cursor: grab;
+  user-select: none;
+}
+
+/* Inset, so the scrolling list does not clip the mark on its first and last rows. */
+.drop-before {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.drop-after {
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
 .ticker {
   flex: 1;
   font-weight: 600;

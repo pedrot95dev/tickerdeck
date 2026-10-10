@@ -65,6 +65,8 @@ export const api = {
   createWatchlist: (name: string) => request<Watchlist>('POST', '/watchlists', { name }),
   renameWatchlist: (id: number, name: string) => request<Watchlist>('PATCH', `/watchlists/${id}`, { name }),
   deleteWatchlist: (id: number) => request<void>('DELETE', `/watchlists/${id}`),
+  reorderWatchlists: (ids: number[]) => request<void>('PUT', '/watchlists/order', { ids }),
+  reorderItems: (id: number, ids: number[]) => request<void>('PUT', `/watchlists/${id}/items/order`, { ids }),
   addItems: (id: number, text: string) =>
     request<{ added: number; skipped: number }>('POST', `/watchlists/${id}/items`, { text }),
   removeItem: (id: number, itemId: number) => request<void>('DELETE', `/watchlists/${id}/items/${itemId}`),
