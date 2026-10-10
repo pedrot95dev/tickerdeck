@@ -53,8 +53,7 @@ Open `http://<host>:8080`. Update with `docker compose pull && docker compose up
 To run an image built from local source instead:
 `docker build -t ghcr.io/pedrot95dev/tickerdeck:latest . && docker compose up -d`.
 
-The container runs as a non-root user (uid 1000). On a Linux host the `data` folder must be
-writable by that user: `sudo chown 1000:1000 data`.
+The container takes ownership of the `data` folder on start (uid 1000), then runs as that non-root user.
 
 ## Back up
 
