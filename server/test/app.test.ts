@@ -116,7 +116,58 @@ test('DELETE /watchlists/:id: 404 on unknown id', async () => {
   expect((await call('DELETE', '/watchlists/999')).status).toBe(404)
 })
 
+test('PUT /watchlists/order reorders the lists, and a new list still goes last', async () => {
+  const a = await createList('A')
+  const b = await createList('B')
+  const c = await createList('C')
+  expect((await call('PUT', '/watchlists/order', { ids: [c, a, b] })).status).toBe(204)
+  const d = await createList('D')
+  expect((await call('GET', '/watchlists')).body.map((l: any) => l.id)).toEqual([c, a, b, d])
+})
+
+test('PUT /watchlists/order: 400 on malformed ids, 409 unless every list is named once', async () => {
+  const a = await createList('A')
+  const b = await createList('B')
+  for (const payload of [undefined, {}, { ids: 'x' }, { ids: [a, '2'] }, { ids: [a, 1.5] }]) {
+    expect((await call('PUT', '/watchlists/order', payload)).status, JSON.stringify(payload)).toBe(400)
+  }
+  for (const ids of [[], [b], [b, b], [b, a, 999], [b, a, a]]) {
+    expect((await call('PUT', '/watchlists/order', { ids })).status, JSON.stringify(ids)).toBe(409)
+  }
+  expect((await call('GET', '/watchlists')).body.map((l: any) => l.id)).toEqual([a, b])
+})
+
 // --- items ---
+
+test('PUT items/order reorders one list only, and a new ticker still goes last', async () => {
+  const a = await createList('A')
+  const b = await createList('B')
+  await addItems(a, 'AAPL MSFT NVDA')
+  await addItems(b, 'AAPL MSFT')
+  const [aapl, msft, nvda] = (await items(a)).map((i) => i.id)
+
+  expect((await call('PUT', `/watchlists/${a}/items/order`, { ids: [nvda, aapl, msft] })).status).toBe(204)
+  await addItems(a, 'TSLA')
+
+  expect((await items(a)).map((i) => i.symbol.ticker)).toEqual(['NVDA', 'AAPL', 'MSFT', 'TSLA'])
+  expect((await items(b)).map((i) => i.symbol.ticker)).toEqual(['AAPL', 'MSFT'])
+})
+
+test('PUT items/order: 404 on unknown list, 400 on malformed ids, 409 unless every item is named once', async () => {
+  const a = await createList('A')
+  const b = await createList('B')
+  await addItems(a, 'AAPL MSFT')
+  await addItems(b, 'NVDA')
+  const [aapl, msft] = (await items(a)).map((i) => i.id)
+  const [other] = (await items(b)).map((i) => i.id)
+
+  expect((await call('PUT', '/watchlists/999/items/order', { ids: [] })).status).toBe(404)
+  expect((await call('PUT', `/watchlists/${a}/items/order`, { ids: 'x' })).status).toBe(400)
+  for (const ids of [[msft], [msft, msft], [msft, aapl, other], [msft, other]]) {
+    expect((await call('PUT', `/watchlists/${a}/items/order`, { ids })).status, JSON.stringify(ids)).toBe(409)
+  }
+  expect((await items(a)).map((i) => i.id)).toEqual([aapl, msft])
+})
 
 test('POST /watchlists/:id/items adds resolved tickers as pending symbols, in order', async () => {
   const id = await createList()

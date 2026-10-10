@@ -57,6 +57,15 @@ function positivePrice(price: unknown): number {
 
 const parsePrice = (body: Record<string, unknown>) => positivePrice(body.price)
 
+/** The new order of some rows; it must name each of the `current` rows once. */
+function parseOrder(body: Record<string, unknown>, current: number[]): number[] {
+  const { ids } = body
+  if (!Array.isArray(ids) || !ids.every((id) => Number.isInteger(id))) throw new HttpError(400, 'ids must be a list of ids')
+  const sorted = (list: number[]) => [...list].sort((a, b) => a - b).join()
+  if (sorted(ids) !== sorted(current)) throw new HttpError(409, 'The order was changed elsewhere; try again')
+  return ids
+}
+
 function validDate(date: unknown): string {
   const time = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date) ? Date.parse(date) : NaN
   // Date.parse rolls 2025-02-30 over into March instead of rejecting it.
@@ -156,6 +165,15 @@ export function buildApp(
         return { id: Number(lastInsertRowid), name, items: [] }
       })
 
+      api.put('/watchlists/order', (req, reply) => {
+        db.transaction(() => {
+          const ids = parseOrder(bodyOf(req), db.prepare('SELECT id FROM watchlists').pluck().all() as number[])
+          const move = db.prepare('UPDATE watchlists SET position = ? WHERE id = ?')
+          ids.forEach((id, index) => move.run(index + 1, id))
+        })()
+        reply.status(204).send()
+      })
+
       api.patch<IdParams>('/watchlists/:id', (req) => {
         const watchlist = getWatchlist(req.params.id)
         const name = parseName(bodyOf(req))
@@ -192,6 +210,17 @@ export function buildApp(
           }
         })()
         return { added, skipped: skipped + tickers.length - added }
+      })
+
+      api.put<IdParams>('/watchlists/:id/items/order', (req, reply) => {
+        const watchlist = getWatchlist(req.params.id)
+        db.transaction(() => {
+          const current = db.prepare('SELECT id FROM watchlist_items WHERE watchlist_id = ?').pluck().all(watchlist.id)
+          const ids = parseOrder(bodyOf(req), current as number[])
+          const move = db.prepare('UPDATE watchlist_items SET position = ? WHERE id = ?')
+          ids.forEach((id, index) => move.run(index + 1, id))
+        })()
+        reply.status(204).send()
       })
 
       api.delete<{ Params: { id: string; itemId: string } }>('/watchlists/:id/items/:itemId', (req, reply) => {
