@@ -136,6 +136,12 @@ export function buildApp(
 
   app.register(
     async (api) => {
+      // Probed by the container health check; kept out of the request log.
+      api.get('/health', { logLevel: 'warn' }, () => {
+        db.prepare('SELECT 1').get()
+        return { status: 'ok' }
+      })
+
       api.get('/watchlists', () => {
         opts.market?.clientSeen()
         return (db.prepare('SELECT id, name FROM watchlists ORDER BY position, id').all() as WatchlistRow[]).map(withItems)

@@ -42,6 +42,17 @@ const count = (table: string) => db.prepare(`SELECT COUNT(*) FROM ${table}`).plu
 
 const RANGE = { fromDate: '2025-01-02', fromPrice: 100.5, toDate: '2025-03-14', toPrice: 120 }
 
+// --- health ---
+
+test('health reports ok while the database answers', async () => {
+  expect(await call('GET', '/health')).toEqual({ status: 200, body: { status: 'ok' } })
+})
+
+test('health fails once the database is gone', async () => {
+  db.close()
+  expect((await call('GET', '/health')).status).toBe(500)
+})
+
 // --- watchlists ---
 
 test('GET /watchlists is empty at first', async () => {
